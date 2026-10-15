@@ -2,25 +2,24 @@
 
 > **Course project** — Sistemas e Aplicações (SSA) · Mestrado em Engenharia Informática (MEINF) · Universidade Fernando Pessoa
 
-[![Status: scaffolding](https://img.shields.io/badge/status-scaffolding%20%28WIP%29-orange)](https://github.com/oshico/UFP_SSA)
+[![Status: baseline validated](https://img.shields.io/badge/status-baseline%20validated-brightgreen)](https://github.com/oshico/UFP_SSA)
 [![R](https://img.shields.io/badge/R-4.6.1-blue)](https://www.r-project.org/)
 [![License: CC BY 4.0](https://img.shields.io/badge/data-CC%20BY%204.0-lightgrey)](https://creativecommons.org/licenses/by/4.0/)
 
 ---
 
-> ### ⚠️ Project status: early scaffolding
+> ### Project status: pipeline validated
 >
-> This repository is currently in the **exploratory scaffolding** stage. The
-> analysis pipeline exists as a draft and has **not yet been executed
-> end-to-end or validated**. Model results are not final and no findings
-> should be drawn from this repository yet.
+> The analysis pipeline has now been **executed end-to-end on the full dataset**
+> and its outputs regenerated. The model below is a *baseline* fit used to prove
+> the pipeline works; the findings are not yet written up.
 >
 > What exists today:
 > - ✅ Repository structure and version control
 > - ✅ Raw dataset acquisition (reproducible download)
-> - 🚧 Draft analysis pipeline (`R/01_ecommerce_churn_analysis.R`)
-> - ⬜ Exploratory analysis and validation
-> - ⬜ Predictive modelling and evaluation
+> - ✅ Analysis pipeline (`R/01_ecommerce_churn_analysis.R`), running clean
+> - ✅ Exploratory analysis and figures
+> - 🚧 Baseline logistic regression; not yet tuned or compared
 > - ⬜ Reproducible report (Quarto / R Markdown)
 
 ---
@@ -63,8 +62,9 @@ transactional records with a REST API for currency normalisation.
 
 **From the REST API** — `ExchangeRate` (GBP → EUR conversion rate)
 
-**Derived in R** — `Amount_EUR`, `Recency_Days`, `Frequency_Orders`,
-`Monetary_Total`, `Return_Ratio`
+**Derived in R** — `LineTotal_GBP`, `LineTotal_EUR`, `Is_Return`,
+`Recency_Days`, `Frequency_Orders`, `Monetary_Total`, `Return_Ratio`,
+`Log_Monetary`
 
 **Target variable** — `Churn_90d`: binary, `1` if `Recency_Days > 90` (Churn),
 `0` otherwise (Active)
@@ -78,7 +78,7 @@ Dataset dimensions: **541,909 rows × 8 source columns**, aggregating to
 .
 ├── data/
 │   ├── raw/
-│   │   ├── Online Retail.csv      # 44 MB — gitignored (re-fetchable)
+│   │   ├── data.csv               # 44 MB — gitignored (re-fetchable)
 │   │   └── download_data.R        # Reproducible acquisition from UCI
 │   └── processed/                 # RFM matrix + churn flag (gitignored)
 ├── docs/
@@ -109,11 +109,11 @@ cd UFP_SSA
 ### 2. Install dependencies
 
 ```r
-install.packages(c("tidyverse", "lubridate", "httr2", "jsonlite", "caret", "readxl"))
+install.packages(c("tidyverse", "lubridate", "httr2", "jsonlite", "readxl"))
 ```
 
-> `caret` is a large package and may take a while to compile. It is only needed
-> for the confusion matrix and ML metrics in the modelling stage.
+> `caret` was dropped: the pipeline only needed a confusion matrix, which
+> `confusion_metrics()` now computes in base R.
 
 ### 3. Acquire the dataset
 
@@ -124,10 +124,10 @@ downloaded from the UCI Machine Learning Repository:
 source("data/raw/download_data.R")
 ```
 
-This writes `data/raw/Online Retail.csv` — the exact filename and column
+This writes `data/raw/data.csv` — the exact filename and column
 format the analysis script expects. It fetches the UCI `.xlsx`, converts it to
-CSV, and reformats `InvoiceDate` into the `d/m/Y H:M` string format that
-`lubridate` parses.
+CSV, and rewrites `InvoiceDate` as `YYYY-MM-DD HH:MM` so the date is
+unambiguous.
 
 Run this **from the repository root**, since all scripts use relative paths.
 
@@ -142,6 +142,29 @@ Outputs:
 - `data/processed/customer_rfm_churn_processed.csv` — customer-level RFM matrix
 - `docs/figures/eda_boxplot_churn_monetary.png`
 - `docs/figures/eda_scatter_frequency_recency.png`
+
+### Verified baseline run
+
+The pipeline has been run end-to-end. It reproduces the figures and dimensions
+expected of this dataset: 541,909 raw rows → 406,789 after cleaning → 4,338
+customers with positive net spend, reference date `2011-12-10` (the day after
+the last transaction). Class balance is 2,905 Active / 1,433 Churn.
+
+Baseline logistic regression on the 70/30 stratified split (1,302 test rows):
+
+| Metric | Value |
+|--------|-------|
+| Accuracy | 0.722 |
+| Sensitivity (recall) | 0.467 |
+| Specificity | 0.847 |
+| Precision | 0.602 |
+| F1 | 0.526 |
+
+All three predictors are significant; the return ratio is the strongest
+(estimate 1.776, p = 0.005), i.e. customers who return more of what they buy
+are more likely to churn. Sensitivity below 0.5 means the model misses over
+half the churners at a 0.5 threshold — acceptable for a baseline, but the next
+iteration should tune the cut-off or compare a tree ensemble.
 
 ### Note on the REST API
 
@@ -162,17 +185,27 @@ reproducible from a clean checkout:
   downloaded by a committed script
 - **Documentation** — findings recorded in a Quarto / R Markdown report
 
-## 7. Known Issues
+## 7. Defects Corrected
 
-These are known defects in the current draft pipeline, recorded here so they
-are not mistaken for finished work:
+The first draft of the pipeline had never been executed. These defects were
+found and fixed before the first end-to-end run:
+
+| # | Location | Defect | Fix |
+|---|----------|--------|-----|
+| 1 | `01_ecommerce_churn_analysis.R` (data loading) | Looked for `Online Retail.csv` behind an untested three-branch fallback chain | Single explicit path, `data/raw/data.csv`, with an actionable error if absent |
+| 2 | `01_ecommerce_churn_analysis.R` (`max_date`) | `max(df_clean, na.rm = TRUE)` was called on a **data frame**, so the reference date never computed | `max(df_clean$InvoiceDate, na.rm = TRUE)` |
+| 3 | `01_ecommerce_churn_analysis.R` (date parsing) | `d/m/Y H:M` was tried **first**, but the UCI file stores `m/d/Y` — every date read as day-first was shifted by months, corrupting `Recency_Days` and therefore the churn label | Formats tried in order ISO → `m/d/Y` → `d/m/Y`; `download_data.R` now emits ISO |
+| 4 | `01_ecommerce_churn_analysis.R` (confusion matrix) | `confusionMatrix()` was passed `test_set` (a data frame) instead of the factor `test_set$Churn_90d`, and pulled in the whole `caret` stack for one calculation | Reference factor corrected; replaced by a local `confusion_metrics()` in base R |
+| 5 | `01_ecommerce_churn_analysis.R` (train/test split) | `createDataPartition(rfm_df, ...)` split without stratifying, so the class balance was not guaranteed in both subsets | `createDataPartition(rfm_df$Churn_90d, ...)` |
+| 6 | `01_ecommerce_churn_analysis.R` (reading) | `CustomerID` was read as `col_double()`, treating an identifier as a measure | Read as `col_character()` |
+
+### Open issues
 
 | # | Location | Issue |
 |---|----------|-------|
-| 1 | `R/01_ecommerce_churn_analysis.R:31-37` | The script looks for `Online Retail.csv`. The dataset has been renamed to match, but the filename fallback chain is untested. |
-| 2 | `R/01_ecommerce_churn_analysis.R:136` | `max(df_clean, na.rm = TRUE)` is called on a **data frame**. This must be `max(df_clean$InvoiceDate, na.rm = TRUE)` or the reference date will not compute. |
-| 3 | `R/01_ecommerce_churn_analysis.R:258` | `confusionMatrix()` is passed `test_set` (a data frame) as the reference instead of the factor `test_set$Churn_90d`. |
-| 4 | Pipeline | **Never executed end-to-end.** Packages are not yet installed in the development environment; behaviour is unverified. |
+| 1 | Model specification | The target is defined purely as `Recency_Days > 90`, so recency is excluded from the predictors by necessity. The model is a genuine test of whether **frequency, value and return behaviour** carry churn signal — worth stating explicitly in the report so it does not read as an oversight. |
+| 2 | `data/raw/data.csv` | A local backup copy is kept for offline runs. It was produced outside `download_data.R` and therefore uses the original `m/d/Y H:M` format; freshly downloaded files use ISO. The reader accepts both. |
+| 3 | `glm()` fit | Emits `fitted probabilities numerically 0 or 1`: `Frequency_Orders` is very heavy-tailed, so a few extreme customers saturate the linear predictor. Harmless for the baseline, but worth noting in the report, and a reason to try a log-transformed frequency later. |
 
 ## 8. Generative AI Usage Declaration
 
