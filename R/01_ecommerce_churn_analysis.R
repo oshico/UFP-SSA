@@ -5,8 +5,7 @@
 suppressPackageStartupMessages({
   library(tidyverse) # dplyr, ggplot2, readr, stringr
   library(lubridate) # date and time handling
-  library(httr2)     # REST requests
-  library(jsonlite)  # JSON parsing
+  library(httr2)     # REST requests and JSON parsing
 })
 
 # 2. Paths ---------------------------------------------------------------------
@@ -72,6 +71,13 @@ df_clean <- df_raw %>%
   ) %>%
   mutate(LineTotal_GBP = Quantity * UnitPrice)
 
+# parse_date_time() returns NA rather than failing when no format matches.
+# Every downstream feature depends on the date, so stop instead of silently
+# losing rows.
+if (anyNA(df_clean$InvoiceDate)) {
+  stop(sum(is.na(df_clean$InvoiceDate)), " InvoiceDate values could not be parsed.")
+}
+
 cat("Rows after dropping missing customers and invalid prices:",
     format(nrow(df_clean), big.mark = ","), "\n")
 
@@ -80,10 +86,12 @@ cat("=== 3. Fetching the GBP -> EUR rate from the REST API ===\n")
 
 #' Look up a GBP -> EUR exchange rate.
 #'
-#' Queries `api_url` when one is supplied, otherwise returns the hardcoded
-#' fallback. A failed request never aborts the pipeline: falling back keeps the
-#' run reproducible when the network is unavailable or rate limited.
-get_gbp_to_eur_rate <- function(base_curr = "GBP", target_curr = "EUR", api_url = NULL) {
+#' Queries the Frankfurter API (ECB reference rates, no API key needed). Pass
+#' `api_url = NULL` to skip the request and use the hardcoded fallback. A failed
+#' request never aborts the pipeline: falling back keeps the run reproducible
+#' when the network is unavailable or rate limited.
+get_gbp_to_eur_rate <- function(base_curr = "GBP", target_curr = "EUR",
+                                api_url = "https://api.frankfurter.app/latest") {
   fallback_rate <- 1.17 # 1 GBP = 1.17 EUR
 
   if (is.null(api_url)) {
@@ -93,8 +101,16 @@ get_gbp_to_eur_rate <- function(base_curr = "GBP", target_curr = "EUR", api_url 
 
   tryCatch(
     {
-      rate <- resp_body_json(request(api_url) %>% req_perform())[[target_curr]]
-      cat(sprintf("Rate from API (%s -> %s): %s\n", base_curr, target_curr, rate))
+      body <- request(api_url) %>%
+        req_url_query(from = base_curr, to = target_curr) %>%
+        req_timeout(10) %>%
+        req_perform() %>%
+        resp_body_json()
+      rate <- body$rates[[target_curr]]
+      if (!is.numeric(rate) || length(rate) != 1) {
+        stop("response has no numeric rates$", target_curr)
+      }
+      cat(sprintf("Rate from API (%s -> %s, %s): %s\n", base_curr, target_curr, body$date, rate))
       rate
     },
     error = function(e) {
@@ -123,7 +139,10 @@ cat("Reference date:", format(max_date, "%Y-%m-%d"), "\n")
 rfm_df <- df_clean %>%
   group_by(CustomerID) %>%
   summarise(
-    LastPurchaseDate = max(InvoiceDate, na.rm = TRUE),
+    # Purchases only: a recent return is not activity, and counting it would
+    # label a lapsed customer Active. Customers with no purchase at all get
+    # -Inf here and are removed by the Monetary_Total filter below.
+    LastPurchaseDate = suppressWarnings(max(InvoiceDate[!Is_Return])),
     Recency_Days     = as.numeric(difftime(max_date, LastPurchaseDate, units = "days")),
 
     # Returns are excluded from the purchase counts so they cannot inflate them.
@@ -135,7 +154,8 @@ rfm_df <- df_clean %>%
     Country = first(Country),
     .groups = "drop"
   ) %>%
-  # Customers with no net spend have nothing to model.
+  # Monetary_Total is gross spend (returns excluded). Customers who never
+  # bought anything have nothing to model.
   filter(Monetary_Total > 0) %>%
   mutate(
     # Target: no purchase for more than 90 days before the reference date.
@@ -144,7 +164,10 @@ rfm_df <- df_clean %>%
       levels = c(0, 1), labels = c("Active", "Churn")
     ),
     # log1p tames the long right tail of spend while still handling zero.
-    Log_Monetary = log1p(Monetary_Total)
+    Log_Monetary = log1p(Monetary_Total),
+    # Frequency is just as heavy-tailed. Left raw, a few extreme customers
+    # saturate the logit ("fitted probabilities numerically 0 or 1").
+    Log_Frequency = log1p(Frequency_Orders)
   )
 
 cat("Unique customers analysed:", format(nrow(rfm_df), big.mark = ","), "\n")
@@ -242,7 +265,7 @@ cat(sprintf("Train: %s rows | Test: %s rows\n",
             format(nrow(test_set), big.mark = ",")))
 
 model_logit <- glm(
-  Churn_90d ~ Frequency_Orders + Log_Monetary + Return_Ratio,
+  Churn_90d ~ Log_Frequency + Log_Monetary + Return_Ratio,
   data = train_set,
   family = binomial(link = "logit")
 )
