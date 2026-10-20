@@ -8,7 +8,8 @@
 # the acquisition METHOD is the actual reproducibility requirement.
 #
 # Usage (from the project root):
-#   Rscript data/raw/download_data.R
+#   Rscript data/raw/download_data.R            # refuses to overwrite data.csv
+#   Rscript data/raw/download_data.R --force    # overwrites it
 #
 # Requires: readxl
 
@@ -44,12 +45,15 @@ if (!dir.exists("data") || !dir.exists("R")) {
   )
 }
 
-if (file.exists(TARGET_CSV)) {
+# readline() returns "" at once under Rscript, so a prompt only makes sense in
+# an interactive session. stop() rather than quit(): quit() would close the
+# whole RStudio session when this file is source()d.
+if (file.exists(TARGET_CSV) && !("--force" %in% commandArgs(trailingOnly = TRUE))) {
   cat("WARNING:", TARGET_CSV, "already exists and will be overwritten.\n")
-  answer <- readline("Continue? (y/N): ")
-  if (!nzchar(answer) || !grepl("^[sSyY]$", answer)) {
-    cat("Cancelled.\n")
-    quit(save = "no", status = 0)
+  answer <- if (interactive()) readline("Continue? (y/N): ") else ""
+  if (!grepl("^[sSyY]$", answer)) {
+    stop("Cancelled: ", TARGET_CSV, " left untouched. ",
+         "Pass --force to overwrite it non-interactively.", call. = FALSE)
   }
 }
 
@@ -61,6 +65,9 @@ cat("DOI :", UCI_DOI, "\n\n")
 
 # Scratch files go to the system temp directory, never into the repository.
 zip_path <- file.path(tempdir(), "online_retail.zip")
+
+# The default 60 s timeout can cut off the ~23 MB archive on a slow connection.
+options(timeout = max(600, getOption("timeout")))
 
 download.file(
   url  = UCI_ZIP_URL,
@@ -103,18 +110,14 @@ cat("Found:", basename(xlsx_path), "\n")
 
 cat("\n=== 3/4. Converting the workbook to CSV ===\n")
 
-# Everything is read as text on purpose. The UCI workbook stores cells in
-# native Excel formats, which a naive xlsx -> CSV export writes out raw:
-#
-#   InvoiceDate -> 40513.351388888892   (Excel date serial)
-#   UnitPrice   -> 2.5499999999999998   (binary floating-point noise)
-#
-# The date would then be unparseable downstream, so each column is converted
-# explicitly instead. 25569 is the number of days from 1899-12-30 to the epoch.
+# Column types are pinned so readxl converts the Excel date serials itself.
+# Doing that conversion by hand ((serial - 25569) * 86400) carries
+# floating-point error that format() truncates, shifting times a minute early.
+# Identifiers stay text: InvoiceNo has "C" prefixes and StockCode letters.
 df <- readxl::read_excel(
   xlsx_path,
   sheet = 1,
-  col_types = "text", # read as text; format explicitly below
+  col_types = c("text", "text", "text", "numeric", "date", "numeric", "text", "text"),
   .name_repair = "minimal"
 )
 
@@ -123,36 +126,32 @@ cat("Rows read (excluding header):", format(nrow(df), big.mark = ","), "\n")
 if (ncol(df) != length(EXPECTED_COLS)) {
   stop("Expected ", length(EXPECTED_COLS), " columns, found ", ncol(df), ".")
 }
+if (!identical(trimws(names(df)), EXPECTED_COLS)) {
+  stop("Unexpected column names: ", paste(names(df), collapse = ", "))
+}
 names(df) <- EXPECTED_COLS
 
 # ISO output date, so the analysis never has to guess between day and month order.
-df$InvoiceDate <- format(
-  as.POSIXct(
-    (suppressWarnings(as.numeric(df$InvoiceDate)) - 25569) * 86400,
-    origin = "1970-01-01",
-    tz = "UTC"
-  ),
-  "%Y-%m-%d %H:%M"
-)
+df$InvoiceDate <- format(df$InvoiceDate, "%Y-%m-%d %H:%M", tz = "UTC")
 
-df$Quantity  <- as.integer(suppressWarnings(as.numeric(df$Quantity)))
-df$UnitPrice <- round(suppressWarnings(as.numeric(df$UnitPrice)), 2)
+# UnitPrice is not rounded: the source has sub-penny prices (e.g. 0.001) that
+# rounding would turn into 0. write.csv already prints 2.5499999999999998 as 2.55.
+df$Quantity <- as.integer(df$Quantity)
 
 # Blank CustomerID cells become NA and are dropped during data wrangling.
-df$CustomerID <- na_if(trimws(df$CustomerID), "")
-
-df$Description[is.na(df$Description) | df$Description == ""] <- "NA"
+df$CustomerID <- trimws(df$CustomerID)
+df$CustomerID[df$CustomerID == ""] <- NA
 
 # 6. Write ---------------------------------------------------------------------
 
 dir.create(dirname(TARGET_CSV), showWarnings = FALSE, recursive = TRUE)
 
-# quote = FALSE keeps the file plain; na = "" writes missing values as empty fields.
+# Fields are quoted so a comma inside a Description cannot split the row;
+# na = "" writes missing values as empty fields.
 utils::write.csv(
   df,
   file = TARGET_CSV,
   row.names = FALSE,
-  quote = FALSE,
   na = ""
 )
 
