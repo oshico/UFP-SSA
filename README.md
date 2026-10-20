@@ -130,6 +130,9 @@ CSV, and rewrites `InvoiceDate` as `YYYY-MM-DD HH:MM` so the date is
 unambiguous.
 
 Run this **from the repository root**, since all scripts use relative paths.
+If `data/raw/data.csv` already exists, the script asks before overwriting it in
+an interactive session. Otherwise it refuses. Pass `--force` to overwrite
+non-interactively (`Rscript data/raw/download_data.R --force`).
 
 ### 4. Run the analysis
 
@@ -145,33 +148,40 @@ Outputs:
 
 ### Verified baseline run
 
-The pipeline has been run end-to-end. It reproduces the figures and dimensions
-expected of this dataset: 541,909 raw rows → 406,789 after cleaning → 4,338
-customers with positive net spend, reference date `2011-12-10` (the day after
-the last transaction). Class balance is 2,905 Active / 1,433 Churn.
+The pipeline has been run end-to-end from a fresh `download_data.R` download
+(R 4.6.1). It reproduces the dimensions expected of this dataset:
+541,909 raw rows → 406,789 after cleaning → 4,338 customers with a purchase,
+reference date `2011-12-10` (the day after the last transaction). Class balance
+is 2,880 Active / 1,458 Churn. Measuring recency from purchases only moved 25
+customers from Active to Churn compared with the first run (2,905 / 1,433).
 
-Baseline logistic regression on the 70/30 stratified split (1,302 test rows):
+Baseline logistic regression on the 70/30 stratified split (1,303 test rows):
 
 | Metric | Value |
 |--------|-------|
-| Accuracy | 0.722 |
-| Sensitivity (recall) | 0.467 |
-| Specificity | 0.847 |
-| Precision | 0.602 |
-| F1 | 0.526 |
+| Accuracy | 0.716 |
+| Sensitivity (recall) | 0.562 |
+| Specificity | 0.794 |
+| Precision | 0.580 |
+| F1 | 0.571 |
 
-All three predictors are significant; the return ratio is the strongest
-(estimate 1.776, p = 0.005), i.e. customers who return more of what they buy
-are more likely to churn. Sensitivity below 0.5 means the model misses over
-half the churners at a 0.5 threshold — acceptable for a baseline, but the next
-iteration should tune the cut-off or compare a tree ensemble.
+All three predictors are significant. Order frequency carries the most signal
+(`Log_Frequency` estimate −1.572, z = −12.0): customers who order more often
+are less likely to churn. Spend is also protective (`Log_Monetary` −0.278,
+z = −4.8). A higher return ratio raises churn risk (1.909, p = 0.006). The fit
+no longer emits the `fitted probabilities numerically 0 or 1` warning. The
+model still misses about 44% of churners at a 0.5 threshold, so the next
+iteration should tune the cut-off or compare a tree ensemble. These numbers
+also carry the feature-window caveat in open issue 3.
 
 ### Note on the REST API
 
-The currency conversion step calls the Open Exchange Rates API. If the call
-fails (no network, rate limit), the script falls back to a hardcoded rate of
-`1 GBP = 1.17 EUR` and prints a warning. For deterministic results, pass an
-explicit API URL as the `api_url` argument of `get_gbp_to_eur_rate()`.
+The currency conversion step calls the
+[Frankfurter API](https://www.frankfurter.app/) (ECB reference rates, no API
+key needed) for the latest GBP → EUR rate. If the call fails (no network, rate
+limit), the script falls back to a hardcoded rate of `1 GBP = 1.17 EUR` and
+prints a warning. For deterministic results, call
+`get_gbp_to_eur_rate(api_url = NULL)` to always use the fallback.
 
 ## 6. Reproducibility
 
@@ -198,14 +208,21 @@ found and fixed before the first end-to-end run:
 | 4 | `01_ecommerce_churn_analysis.R` (confusion matrix) | `confusionMatrix()` was passed `test_set` (a data frame) instead of the factor `test_set$Churn_90d`, and pulled in the whole `caret` stack for one calculation | Reference factor corrected; replaced by a local `confusion_metrics()` in base R |
 | 5 | `01_ecommerce_churn_analysis.R` (train/test split) | `createDataPartition(rfm_df, ...)` split without stratifying, so the class balance was not guaranteed in both subsets | `createDataPartition(rfm_df$Churn_90d, ...)` |
 | 6 | `01_ecommerce_churn_analysis.R` (reading) | `CustomerID` was read as `col_double()`, treating an identifier as a measure | Read as `col_character()` |
+| 7 | `download_data.R` (conversion) | Called `na_if()` from dplyr without loading it, so the script crashed before writing the CSV | Base R replacement |
+| 8 | `download_data.R` (overwrite prompt) | Under `Rscript`, `readline()` returns `""` at once, so the script always cancelled. Under `source()`, `quit()` closed the whole R session | Prompt only when `interactive()`, a `--force` flag, and `stop()` instead of `quit()` |
+| 9 | `download_data.R` (dates) | Excel date serials were converted by hand. Floating-point error plus truncation could shift times a minute early | readxl reads the column as `date` and converts it itself |
+| 10 | `download_data.R` (prices / CSV) | `round(UnitPrice, 2)` turned sub-penny prices into 0, and `quote = FALSE` let a comma in `Description` split a row | No rounding; fields quoted |
+| 11 | `01_ecommerce_churn_analysis.R` (recency) | `LastPurchaseDate` included return lines, so a lapsed customer with a recent return was labelled Active | Last date over purchases only |
+| 12 | `01_ecommerce_churn_analysis.R` (FX) | `get_gbp_to_eur_rate()` was always called with `api_url = NULL`, so the REST API was never actually queried | Defaults to the Frankfurter API, with the fallback kept |
+| 13 | `01_ecommerce_churn_analysis.R` (`glm`) | Raw `Frequency_Orders` saturated the logit (`fitted probabilities numerically 0 or 1`) | `log1p(Frequency_Orders)` |
 
 ### Open issues
 
 | # | Location | Issue |
 |---|----------|-------|
 | 1 | Model specification | The target is defined purely as `Recency_Days > 90`, so recency is excluded from the predictors by necessity. The model is a genuine test of whether **frequency, value and return behaviour** carry churn signal — worth stating explicitly in the report so it does not read as an oversight. |
-| 2 | `data/raw/data.csv` | A local backup copy is kept for offline runs. It was produced outside `download_data.R` and therefore uses the original `m/d/Y H:M` format; freshly downloaded files use ISO. The reader accepts both. |
-| 3 | `glm()` fit | Emits `fitted probabilities numerically 0 or 1`: `Frequency_Orders` is very heavy-tailed, so a few extreme customers saturate the linear predictor. Harmless for the baseline, but worth noting in the report, and a reason to try a log-transformed frequency later. |
+| 2 | `data/raw/data.csv` | Older copies made outside `download_data.R` (e.g. the Kaggle export) use `m/d/Y H:M` dates; files from the script use ISO. The reader accepts both, but regenerating with `download_data.R --force` is preferred. |
+| 3 | Feature window | Frequency and Monetary are computed over the same period the label is read from. A churner has had less active time, so has fewer orders by construction, and the model partly learns that. The standard fix is a time split: compute features up to a cutoff date (e.g. 2011-09-10) and label churn from activity in the 90 days after it. |
 
 ## 8. Generative AI Usage Declaration
 
