@@ -1,0 +1,135 @@
+---
+title: "M2 · Apresentação do problema"
+subtitle: "Análise transacional e modelação preditiva de churn no e-commerce"
+date: 2026-10-14
+date-modified: last-modified
+---
+
+::: {.callout-note collapse="true"}
+## Nota de revisão
+
+Este documento substitui o PDF original de M2 (`docs/m2.pdf`, no histórico Git).
+O dicionário de dados é agora **calculado a partir do ficheiro bruto** em vez de
+escrito à mão, o que corrigiu três erros do original: `CustomerID` não é um
+inteiro mas um identificador (lido como texto), a API cambial é a Frankfurter
+(BCE) e não a Open Exchange Rates, e a origem dos dados é o UCI e não o Kaggle.
+O número de clientes únicos e a definição da variável-alvo também mudaram em
+fases posteriores; os valores abaixo referem-se ao ficheiro bruto.
+:::
+
+```{r}
+#| include: false
+knitr::read_chunk("R/ecommerce_churn_analysis.R")
+```
+
+```{r}
+#| label: setup
+#| include: false
+```
+
+## Definição do problema
+
+No retalho online, a retenção de compradores é o principal motor de
+rentabilidade a longo prazo: adquirir um cliente novo custa mais do que manter
+um existente. O **churn silencioso** (o cliente deixa de comprar sem aviso) é
+difícil de detetar precisamente porque não gera nenhum evento.
+
+O projeto constrói em R um modelo de apoio à decisão que processa o histórico
+transacional, normaliza os valores para euros através de uma API REST cambial,
+constrói a matriz comportamental RFM (Recência, Frequência, Valor monetário) e
+estima a probabilidade de um cliente não comprar nos 90 dias seguintes.
+
+## Perguntas de investigação
+
+| ID | Pergunta | Variáveis | Técnica em R |
+|---|---|---|---|
+| **P1** | Como variam os volumes de faturação e as frequências de encomenda ao longo dos trimestres e entre mercados geográficos? | `InvoiceDate`, `LineTotal_EUR`, `Country` | Agregação temporal (`dplyr`), mapa de calor (`ggplot2`), teste do qui-quadrado, Kruskal-Wallis |
+| **P2** | Qual a relação entre o rácio de devoluções e os segmentos RFM dos clientes? | `Return_Ratio`, `Recency_Days`, `Frequency_Orders`, `Monetary_EUR` | Segmentação RFM por quintis, Kruskal-Wallis, qui-quadrado, correlação de Spearman |
+| **P3** | Há diferença estatisticamente significativa no valor médio por encomenda entre clientes recorrentes e ocasionais? | `Frequency_Orders`, `AOV_EUR` | Teste *t* de Welch sobre log(AOV), Wilcoxon |
+| **P4** | É possível prever o churn a 90 dias com sensibilidade adequada? | `Churn_90d` (alvo), métricas RFM, `Return_Ratio` | Regressão logística e árvore de decisão (`rpart`), matriz de confusão, curva ROC |
+
+## Dados
+
+Fonte principal: *Online Retail*, UCI Machine Learning Repository
+(Chen, 2015, DOI [10.24432/C5BW33](https://doi.org/10.24432/C5BW33), CC BY 4.0).
+Transações de um retalhista online britânico entre 01/12/2010 e 09/12/2011.
+O ficheiro é descarregado por `data/raw/download_data.R`; não está versionado.
+
+```{r}
+#| label: load
+```
+
+### Dicionário de dados: variáveis de origem
+
+```{r}
+#| label: data-dictionary
+#| echo: false
+descriptions <- c(
+  InvoiceNo   = "Número da fatura; o prefixo 'C' indica cancelamento",
+  StockCode   = "Código do produto; alguns códigos são portes, taxas ou ajustes",
+  Description = "Designação do artigo (texto livre)",
+  Quantity    = "Unidades por linha; negativa numa devolução",
+  InvoiceDate = "Data e hora da fatura",
+  UnitPrice   = "Preço unitário em libras (GBP)",
+  CustomerID  = "Identificador do cliente (texto; não é uma medida)",
+  Country     = "País do cliente"
+)
+type_label <- c(character = "Texto", integer = "Inteiro", numeric = "Numérico")
+
+tibble(
+  Variável    = names(df_raw),
+  Tipo        = type_label[map_chr(df_raw, ~ class(.x)[1])],
+  Descrição   = descriptions[names(df_raw)],
+  `Valores distintos` = map_int(df_raw, n_distinct),
+  `Em falta`  = map_int(df_raw, ~ sum(is.na(.x))),
+  `% em falta` = map_chr(df_raw, ~ fmt_pct(mean(is.na(.x)), 2))
+) %>%
+  mutate(across(c(`Valores distintos`, `Em falta`), fmt_num)) %>%
+  knitr::kable(align = "lllrrr")
+```
+
+`InvoiceDate` é lida como texto e convertida para data/hora na limpeza, com os
+formatos tentados por ordem explícita (ISO, depois `m/d/Y`), porque uma ordem
+errada desloca as datas meses sem dar erro.
+
+### Dicionário de dados: variáveis externas e derivadas
+
+| Variável | Tipo | Origem | Significado |
+|---|---|---|---|
+| `GBP_EUR` | Numérico | API Frankfurter (BCE) | Taxa de câmbio diária GBP → EUR do dia da fatura |
+| `LineTotal_EUR` | Numérico | Calculada | `Quantity × UnitPrice × GBP_EUR` |
+| `Is_Return` | Lógico | Calculada | Fatura "C" ou quantidade negativa |
+| `Recency_Days` | Numérico | Calculada (RFM) | Dias desde a última compra até à data de referência |
+| `Frequency_Orders` | Inteiro | Calculada (RFM) | Número de faturas de compra distintas |
+| `Monetary_EUR` | Numérico | Calculada (RFM) | Soma das compras em EUR (sem devoluções nem encomendas canceladas) |
+| `Return_Ratio` | Proporção | Calculada | Linhas de devolução / total de linhas do cliente |
+| `AOV_EUR` | Numérico | Calculada | Valor médio por encomenda (`Monetary_EUR / Frequency_Orders`) |
+| `Tenure_Days` | Numérico | Calculada | Dias desde a primeira compra |
+| `Churn_90d` | Fator (Ativo/Churn) | Alvo | Churn se o cliente não compra nos 90 dias após a data de corte |
+
+## Validação dos critérios de elegibilidade
+
+| Critério | Valor medido | Cumpre? |
+|---|---|---|
+| ≥ 1000 registos | `r fmt_num(nrow(df_raw))` linhas | Sim |
+| 6 a 8 variáveis relevantes | `r ncol(df_raw)` variáveis de origem, mais as derivadas acima | Sim |
+| Diversidade tipológica | Numéricas, categóricas, texto livre, temporais | Sim |
+| *Wrangling* necessário | `r fmt_num(sum(is.na(df_raw$CustomerID)))` linhas sem cliente, `r fmt_num(sum(duplicated(df_raw)))` duplicados exatos, `r fmt_num(sum(str_detect(df_raw$InvoiceNo, "^C")))` linhas de cancelamento | Sim |
+| Acesso público | UCI, CC BY 4.0, descarregado por script | Sim |
+| ≥ 3 perguntas complexas | 4 perguntas, com testes estatísticos e modelação | Sim |
+
+O ficheiro contém `r fmt_num(n_distinct(df_raw$CustomerID, na.rm = TRUE))`
+identificadores de cliente distintos e `r n_distinct(df_raw$Country)` países.
+
+## Estrutura do repositório
+
+```
+.
+├── R/ecommerce_churn_analysis.R   # pipeline completo (limpeza → modelos)
+├── data/raw/download_data.R       # aquisição reprodutível do UCI
+├── data/external/                 # cache das taxas de câmbio (local, não versionada)
+├── data/processed/                # saídas do pipeline (não versionadas)
+├── docs/figures/                  # figuras ggplot2 geradas pelo pipeline
+├── reports/                       # M1–M4 e apresentação em Quarto
+└── _quarto.yml                    # configuração comum dos relatórios
+```

@@ -1,0 +1,100 @@
+---
+title: "M1 · Proposta de projeto"
+subtitle: "Previsão de churn e otimização do Customer Lifetime Value (CLV) no e-commerce"
+date: 2026-10-14
+date-modified: last-modified
+toc: false
+number-sections: false
+---
+
+::: {.callout-note collapse="true"}
+## Nota de revisão
+
+Este documento substitui o PDF original de M1 (`docs/m1.pdf`, disponível no
+histórico Git). O conteúdo da proposta mantém-se; foram corrigidos apenas factos
+que mudaram ou estavam errados: a API cambial usada é a **Frankfurter** (taxas de
+referência do BCE) e não a Open Exchange Rates; a fonte primária dos dados é o
+repositório **UCI** e não o Kaggle; e o endereço do repositório é
+`github.com/oshico/UFP-SSA`.
+:::
+
+```{r}
+#| include: false
+knitr::read_chunk("R/ecommerce_churn_analysis.R")
+```
+
+```{r}
+#| label: setup
+#| include: false
+```
+
+```{r}
+#| label: load
+#| include: false
+```
+
+| | |
+|---|---|
+| **Estudante** | Francisco Oliveira |
+| **UC** | Seminário de Sistemas e Aplicações (SSA) · MEINF · UFP |
+| **Docente** | Prof. Doutor Luís Borges Gouveia |
+| **Repositório** | <https://github.com/oshico/UFP-SSA> |
+
+## Contexto e motivação
+
+No comércio eletrónico, o custo de aquisição de clientes (CAC) tem vindo a
+aumentar, o que torna a retenção a estratégia mais rentável para proteger
+margens. As plataformas digitais sofrem, no entanto, de **churn silencioso**: o
+cliente deixa simplesmente de comprar, sem reclamar nem cancelar nada. Não há um
+evento que marque a saída; ela tem de ser inferida do comportamento.
+
+Esta proposta visa construir em R, seguindo a metodologia CRISP-DM, uma solução
+que identifique padrões de abandono e estime a probabilidade de um cliente não
+voltar a comprar nos 90 dias seguintes, para apoiar campanhas de retenção
+dirigidas e a otimização do CLV.
+
+## Justificação pessoal
+
+::: {.callout-tip appearance="simple" icon="false"}
+## Porquê este tema
+
+As plataformas digitais fazem parte do nosso quotidiano e, quase sem darmos
+por isso, reagem ao nosso comportamento:
+
+- **Recomendações personalizadas** surgem logo depois de visualizarmos um
+  anúncio;
+- **Cupões de desconto por inatividade** aparecem quando deixamos de usar a
+  plataforma durante algum tempo.
+
+Foi esta observação que motivou a escolha do tema. Quis perceber **como estas
+plataformas transformam a informação que recolhem sobre os utilizadores em
+estratégias de retenção** e, em particular, como é possível antecipar que um
+cliente está prestes a abandonar.
+:::
+
+## Dados
+
+| Critério do guião | Como o projeto o cumpre |
+|---|---|
+| Dimensão | *Online Retail* (UCI, DOI [10.24432/C5BW33](https://doi.org/10.24432/C5BW33)): `r fmt_num(nrow(df_raw))` linhas de transações reais × `r ncol(df_raw)` colunas |
+| Tipologia | Numéricas (quantidade, preço), categóricas (país, produto, cliente), texto livre (descrição) e temporais (data/hora da fatura) |
+| Necessidade de *wrangling* | Clientes em falta, devoluções e cancelamentos, duplicados, linhas que não são produtos, agregação ao nível do cliente (matriz RFM) |
+| Fonte dinâmica | API REST Frankfurter (BCE) consumida com `httr2` para converter GBP → EUR |
+| Acesso e reprodutibilidade | Dados públicos (CC BY 4.0), descarregados por script versionado; caminhos relativos |
+
+## Perguntas analíticas iniciais
+
+1. Como variam a frequência de compra e os volumes de faturação por trimestre e
+   por região geográfica?
+2. Qual a relação entre a taxa de devolução de produtos e os segmentos RFM
+   (Recência, Frequência, Valor)?
+3. É possível treinar em R um classificador (regressão logística ou árvore de
+   decisão) que preveja o churn a 90 dias?
+
+As perguntas foram refinadas e alargadas para quatro em M2.
+
+## Entregáveis
+
+Relatório reprodutível em Quarto que junta narrativa, código R e resultados;
+histórico de *commits* no GitHub; declaração transparente do uso de assistentes
+de IA (ver `README.md`).
