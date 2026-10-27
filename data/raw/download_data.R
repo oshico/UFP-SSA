@@ -1,109 +1,96 @@
-# ==============================================================================
-# UC:  Seminario de Sistemas e Aplicacoes (SSA - MEINF / UFP)
-# Tarefa: Aquisição reprodutível do dataset bruto
-# ------------------------------------------------------------------------------
-# Este script NAO faz parte do pipeline de analise. É um utilitário de
-# preparação que descarrega o dataset "Online Retail" da UCI Machine Learning
-# Repository e converte-o para o formato CSV esperado pelo projeto.
+# Reproducible acquisition of the raw dataset (SSA - MEINF / UFP).
 #
-# Porque existe?
-#   O ficheiro bruto tem ~44 MB. Versionar ficheiros tão grandes incha o
-#   repositorio sem acrescentar informação. Em vez disso, versionamos o
-#   METODO de obtenção dos dados, que é o requisito real de reprodutibilidade.
+# Not part of the analysis pipeline. This utility downloads the UCI "Online
+# Retail" dataset and converts it into the CSV that R/01_...R expects.
 #
-# Como usar:
-#   Rscript data/raw/download_data.R
+# Why a script rather than the file itself: the raw export is ~44 MB, so
+# committing it bloats the repository without adding information. Versioning
+# the acquisition METHOD is the actual reproducibility requirement.
 #
-# Dependências: readxl (conversão de .xlsx), httr2 ou utils::download.file
-# ==============================================================================
+# Usage (from the project root):
+#   Rscript data/raw/download_data.R            # refuses to overwrite data.csv
+#   Rscript data/raw/download_data.R --force    # overwrites it
+#
+# Requires: readxl
 
 suppressPackageStartupMessages({
   library(readxl)
 })
 
-# ------------------------------------------------------------------------------
-# 1. CONSTANTES E CONFIGURACAO
-# ------------------------------------------------------------------------------
+# 1. Configuration -------------------------------------------------------------
 
 UCI_ZIP_URL <- "https://archive.ics.uci.edu/static/public/352/online+retail.zip"
 UCI_DOI     <- "10.24432/C5BW33"
 
-# Nome EXATO esperado por R/01_ecommerce_churn_analysis.R (linha 31).
-TARGET_CSV <- file.path("data", "raw", "Online Retail.csv")
+# Filename expected by R/01_ecommerce_churn_analysis.R.
+TARGET_CSV <- file.path("data", "raw", "data.csv")
 
-# Nº de linhas de dados esperado (exclui o cabeçalho).
 EXPECTED_ROWS <- 541909
-
 EXPECTED_COLS <- c(
   "InvoiceNo", "StockCode", "Description", "Quantity",
   "InvoiceDate", "UnitPrice", "CustomerID", "Country"
 )
 
-# ------------------------------------------------------------------------------
-# 2. VERIFICACOES DE PRE-CONDICAO
-# ------------------------------------------------------------------------------
+# 2. Pre-conditions -----------------------------------------------------------
 
 if (!requireNamespace("readxl", quietly = TRUE)) {
-  stop("Pacote 'readxl' em falta. Instale com: install.packages('readxl')")
+  stop("Package 'readxl' is missing. Install it with: install.packages('readxl')")
 }
 
-# Garante que estamos na raiz do projeto (mesma pasta que contem 'data/' e 'R/').
-# Os scripts usam caminhos relativos; executar a partir da raiz é obrigatório.
+# Both scripts use relative paths, so the working directory must be the root.
 if (!dir.exists("data") || !dir.exists("R")) {
   stop(
-    "Execute a partir da raiz do projeto.\n",
-    "O script espera encontrar as pastas 'data/' e 'R/' no diretorio atual.\n",
-    "Diretorio atual: ", normalizePath(".")
+    "Run this from the project root.\n",
+    "Expected 'data/' and 'R/' in the current directory, found: ", normalizePath(".")
   )
 }
 
-if (file.exists(TARGET_CSV)) {
-  cat("AVISO: ja existe", TARGET_CSV, "\n")
-  cat("O ficheiro sera sobreescrito. Apague-o manualmente se nao quiser\n",
-      "continuar.\n\n", sep = "")
-  answer <- readline("Continuar? (s/N): ")
-  if (!nzchar(answer) || !grepl("^[sSyY]$", answer)) {
-    cat("Operacao cancelada.\n")
-    quit(save = "no", status = 0)
+# readline() returns "" at once under Rscript, so a prompt only makes sense in
+# an interactive session. stop() rather than quit(): quit() would close the
+# whole RStudio session when this file is source()d.
+if (file.exists(TARGET_CSV) && !("--force" %in% commandArgs(trailingOnly = TRUE))) {
+  cat("WARNING:", TARGET_CSV, "already exists and will be overwritten.\n")
+  answer <- if (interactive()) readline("Continue? (y/N): ") else ""
+  if (!grepl("^[sSyY]$", answer)) {
+    stop("Cancelled: ", TARGET_CSV, " left untouched. ",
+         "Pass --force to overwrite it non-interactively.", call. = FALSE)
   }
 }
 
-# ------------------------------------------------------------------------------
-# 3. DESCARGA DO FICHEIRO .zip DA UCI
-# ------------------------------------------------------------------------------
+# 3. Download ------------------------------------------------------------------
 
-cat("=== 1/4. A descarregar o dataset da UCI Machine Learning Repository ===\n")
+cat("=== 1/4. Downloading the dataset from the UCI Machine Learning Repository ===\n")
 cat("URL :", UCI_ZIP_URL, "\n")
 cat("DOI :", UCI_DOI, "\n\n")
 
-# Ficheiros temporarios vão para o diretorio temporario do sistema,
-# nunca para a raiz do repositorio.
+# Scratch files go to the system temp directory, never into the repository.
 zip_path <- file.path(tempdir(), "online_retail.zip")
+
+# The default 60 s timeout can cut off the ~23 MB archive on a slow connection.
+options(timeout = max(600, getOption("timeout")))
 
 download.file(
   url  = UCI_ZIP_URL,
   dest = zip_path,
-  mode = "wb",          # binário: obrigatório no Windows
+  mode = "wb", # binary: mandatory on Windows
   quiet = FALSE
 )
 
 if (!file.exists(zip_path) || file.size(zip_path) < 1e6) {
-  stop("Falha na descarga: ficheiro .zip ausente ou demasiado pequeno.")
+  stop("Download failed: the .zip is missing or implausibly small.")
 }
 
-cat("\nDescarregado:", round(file.size(zip_path) / 1024^2, 1), "MB\n")
+cat("\nDownloaded:", round(file.size(zip_path) / 1024^2, 1), "MB\n")
 
-# ------------------------------------------------------------------------------
-# 4. EXTRACAO DO .xlsx
-# ------------------------------------------------------------------------------
+# 4. Extract -------------------------------------------------------------------
 
-cat("\n=== 2/4. A extrair 'Online Retail.xlsx' ===\n")
+cat("\n=== 2/4. Extracting the workbook ===\n")
 
 unzip_dir <- file.path(tempdir(), "online_retail_xlsx")
 dir.create(unzip_dir, showWarnings = FALSE, recursive = TRUE)
 unzip(zip_path, exdir = unzip_dir)
 
-# Localiza o .xlsx de forma tolerante a variations de nome/caminho.
+# Tolerate variations in the filename UCI ships.
 xlsx_candidates <- list.files(
   unzip_dir,
   pattern = "\\.xlsx$",
@@ -113,133 +100,88 @@ xlsx_candidates <- list.files(
 )
 
 if (length(xlsx_candidates) == 0) {
-  stop("Nenhum ficheiro .xlsx encontrado dentro do .zip descarregado.")
+  stop("No .xlsx file found inside the downloaded .zip.")
 }
 
 xlsx_path <- xlsx_candidates[1]
-cat("Encontrado:", basename(xlsx_path), "\n")
+cat("Found:", basename(xlsx_path), "\n")
 
-# ------------------------------------------------------------------------------
-# 5. LEITURA E CONVERSAO PARA CSV
-# ------------------------------------------------------------------------------
-#
-# NOTA TECNICA IMPORTANTE (porquê e que lê col_types = "text"):
-#
-#   O ficheiro original da UCI e um Excel cujas celulas estao gravadas em
-#   formato NUMERICO NATIVO do Excel, não como texto:
-#
-#       InvoiceDate -> 40513.351388888892   (serial date do Excel)
-#       UnitPrice   -> 2.5499999999999998   (ponto flutuante binário)
-#
-#   Uma conversao ingenua xlsx -> CSV produciria esses valores crus, e a
-#   analise em R falharia ao tentar interpretar a data.
-#
-#   Por isso lemos TUDO como texto e formatamos explicitamente:
-#     - InvoiceDate: serial do Excel -> POSIXct -> "%d/%m/%Y %H:%M"
-#       (25569 = dias entre 1899-12-30 e 1970-01-01)
-#     - UnitPrice  : round(..., 2)
-#
-#   Isto reproduz exactamente o formato de data esperado por
-#   lubridate::parse_date_time(orders = "d/m/Y H:M") em R/01_...R (linha 72).
-# ------------------------------------------------------------------------------
+# 5. Convert to CSV ------------------------------------------------------------
 
-cat("\n=== 3/4. A ler e converter o .xlsx para CSV ===\n")
+cat("\n=== 3/4. Converting the workbook to CSV ===\n")
 
+# Column types are pinned so readxl converts the Excel date serials itself.
+# Doing that conversion by hand ((serial - 25569) * 86400) carries
+# floating-point error that format() truncates, shifting times a minute early.
+# Identifiers stay text: InvoiceNo has "C" prefixes and StockCode letters.
 df <- readxl::read_excel(
   xlsx_path,
-  sheet       = 1,
-  col_types   = "text",     # <- le como texto; formatamos manualmente a seguir
+  sheet = 1,
+  col_types = c("text", "text", "text", "numeric", "date", "numeric", "text", "text"),
   .name_repair = "minimal"
 )
 
-cat("Linhas lidas (sem cabecalho):", nrow(df), "\n")
+cat("Rows read (excluding header):", format(nrow(df), big.mark = ","), "\n")
 
-# Normaliza nomes das colunas para os nomes canonicos esperados.
-names(df) <- trimws(names(df))
+if (ncol(df) != length(EXPECTED_COLS)) {
+  stop("Expected ", length(EXPECTED_COLS), " columns, found ", ncol(df), ".")
+}
+if (!identical(trimws(names(df)), EXPECTED_COLS)) {
+  stop("Unexpected column names: ", paste(names(df), collapse = ", "))
+}
 names(df) <- EXPECTED_COLS
 
-# --- InvoiceDate: serial numerico do Excel -> data/hora legivel -------------
-serial <- suppressWarnings(as.numeric(df$InvoiceDate))
-df$InvoiceDate <- as.POSIXct(
-  (serial - 25569) * 86400,
-  origin = "1970-01-01",
-  tz     = "UTC"
-)
-df$InvoiceDate <- format(df$InvoiceDate, "%d/%m/%Y %H:%M", tz = "UTC")
+# ISO output date, so the analysis never has to guess between day and month order.
+df$InvoiceDate <- format(df$InvoiceDate, "%Y-%m-%d %H:%M", tz = "UTC")
 
-# --- Quantity: inteiro --------------------------------------------------------
-df$Quantity <- as.integer(suppressWarnings(as.numeric(df$Quantity)))
+# UnitPrice is not rounded: the source has sub-penny prices (e.g. 0.001) that
+# rounding would turn into 0. write.csv already prints 2.5499999999999998 as 2.55.
+df$Quantity <- as.integer(df$Quantity)
 
-# --- UnitPrice: numerico arredondado a 2 casas -------------------------------
-df$UnitPrice <- round(as.numeric(suppressWarnings(as.numeric(df$UnitPrice))), 2)
+# Blank CustomerID cells become NA and are dropped during data wrangling.
+df$CustomerID <- trimws(df$CustomerID)
+df$CustomerID[df$CustomerID == ""] <- NA
 
-# --- CustomerID: mantem como texto; celulas vazias -> NA ---------------------
-# (o script de analise converte para col_double(); celulas vazias tornam-se NA
-#  e sao filtradas na etapa de data wrangling)
-df$CustomerID <- na_if(trimws(df$CustomerID), "")
-
-# --- Descricao ausente -> "NA" ----------------------------------------------
-df$Description[is.na(df$Description) | df$Description == ""] <- "NA"
-
-# ------------------------------------------------------------------------------
-# 6. GRAVACAO DO CSV
-# ------------------------------------------------------------------------------
+# 6. Write ---------------------------------------------------------------------
 
 dir.create(dirname(TARGET_CSV), showWarnings = FALSE, recursive = TRUE)
 
-# write.csv com quote=FALSE e row.names=FALSE produz um CSV limpo, com
-# separador decimal ponto (igual ao ficheiro original).
+# Fields are quoted so a comma inside a Description cannot split the row;
+# na = "" writes missing values as empty fields.
 utils::write.csv(
   df,
-  file    = TARGET_CSV,
+  file = TARGET_CSV,
   row.names = FALSE,
-  quote     = FALSE,
-  na        = ""            # CustomerID em falta -> campo vazio (célula vazia)
+  na = ""
 )
 
-cat("CSV gravado em:", TARGET_CSV, "\n")
+cat("CSV written to:", TARGET_CSV, "\n")
 
-# ------------------------------------------------------------------------------
-# 7. VALIDACAO DO RESULTADO
-# ------------------------------------------------------------------------------
+# 7. Validate ------------------------------------------------------------------
 
-cat("\n=== 4/4. A validar o dataset obtido ===\n")
+cat("\n=== 4/4. Validating the dataset ===\n")
 
-n_rows <- nrow(df)
-n_cols <- ncol(df)
+cat("Rows      :", format(nrow(df), big.mark = ","), "\n")
+cat("Columns   :", ncol(df), "\n")
 
-cat("Nº de linhas :", n_rows, "\n")
-cat("Nº de colunas:", n_cols, "\n")
-
-if (n_rows != EXPECTED_ROWS) {
-  warning(
-    sprintf("Esperava %d linhas mas obtive %d. Verifique a integridade da fonte.",
-            EXPECTED_ROWS, n_rows)
-  )
+if (nrow(df) != EXPECTED_ROWS) {
+  warning(sprintf(
+    "Expected %d rows but got %d. Check the integrity of the source.",
+    EXPECTED_ROWS, nrow(df)
+  ))
 } else {
-  cat("OK  numero de linhas conforme o esperado (", EXPECTED_ROWS, ").\n", sep = "")
+  cat("OK  row count matches the expected", format(EXPECTED_ROWS, big.mark = ","), ".\n")
 }
 
-if (n_cols != length(EXPECTED_COLS)) {
-  stop("Numero inesperado de colunas.")
-}
-
-# Amostra das primeiras linhas, para inspeccao visual rapida.
-cat("\nPrimeiras 3 linhas:\n")
+cat("\nFirst 3 rows:\n")
 print(utils::head(df, 3))
 
-# Resumo de clientes unicos (deve ser ~4.372).
 n_customers <- length(unique(na.omit(df$CustomerID)))
-cat("\nClientes unicos (CustomerID):", format(n_customers, big.mark = ","), "\n")
+cat("\nUnique customers (CustomerID):", format(n_customers, big.mark = ","), "\n")
 
-cat("\n", strrep("=", 60), "\n", sep = "")
-cat("DATASET PRONTO.\n")
-cat("Ficheiro:", TARGET_CSV, "\n")
-cat("Tamanho:", round(file.size(TARGET_CSV) / 1024^2, 1), "MB\n")
-cat("\nProximo passo: executar a analise com\n")
-cat("  source(\"R/01_ecommerce_churn_analysis.R\")\n")
-cat("a partir da raiz do projeto.\n")
-cat(strrep("=", 60), "\n", sep = "")
+cat("\nDataset ready:", TARGET_CSV, "\n")
+cat("Size        :", round(file.size(TARGET_CSV) / 1024^2, 1), "MB\n")
+cat("\nNext step: source(\"R/01_ecommerce_churn_analysis.R\") from the project root.\n")
 
-# Limpeza dos ficheiros temporarios
+# Clean up the scratch files.
 unlink(c(zip_path, unzip_dir), recursive = TRUE, force = TRUE)
