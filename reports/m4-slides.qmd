@@ -1,0 +1,164 @@
+---
+title: "Quem vai deixar de comprar?"
+subtitle: "Previsão de churn no e-commerce · M4 · SSA"
+date: last-modified
+format:
+  revealjs:
+    theme: simple
+    slide-number: true
+    embed-resources: true
+    code-fold: false
+    width: 1280
+    height: 720
+toc: false
+number-sections: false
+echo: false
+---
+
+```{r}
+#| include: false
+# Runs the whole pipeline; the slides only use its figures and numbers.
+source("R/ecommerce_churn_analysis.R")
+r_logit <- model_results[1, ]
+r_opt   <- model_results[2, ]
+r_tree  <- model_results[3, ]
+cm_opt  <- m_logit_opt$matrix
+top5_share <- with(rfm_df, sum(sort(Monetary_EUR, decreasing = TRUE)[1:ceiling(0.05 * length(Monetary_EUR))]) / sum(Monetary_EUR))
+# Paths are relative to this file (reports/), where pandoc looks for images.
+fig <- function(name) knitr::include_graphics(file.path("..", "docs", "figures", paste0(name, ".png")), error = FALSE)
+```
+
+## O problema
+
+::: {.incremental}
+- Num retalhista online o cliente **não cancela**: simplesmente deixa de comprar.
+- Reter é mais barato do que adquirir, mas só se soubermos **a quem** dirigir a
+  campanha.
+- Objetivo: estimar a probabilidade de um cliente **não comprar nos próximos 90 dias**.
+:::
+
+## Os dados {.smaller}
+
+- **UCI *Online Retail***: `r fmt_num(nrow(df_raw))` linhas de faturas, dez 2010 – dez 2011
+- **API REST Frankfurter (BCE)**: taxa GBP → EUR do dia de cada venda
+- Depois da limpeza: **`r fmt_num(nrow(rfm_df))` clientes** com perfil RFM
+
+| Passo de limpeza | Linhas removidas |
+|---|---:|
+| Duplicados exatos | `r fmt_num(n_duplicates)` |
+| Sem cliente | `r fmt_num(wrangling_log$rows[2] - wrangling_log$rows[3])` |
+| Portes, taxas, ajustes, preços ≤ 0 | `r fmt_num(wrangling_log$rows[3] - wrangling_log$rows[5])` |
+| Compras anuladas (deixam de contar como gasto) | `r fmt_num(n_cancelled_purchases)` |
+
+## Poucos clientes valem muito
+
+```{r}
+fig("eda_rfm_distributions")
+```
+
+Os 5% que mais gastam geram **`r fmt_pct(top5_share)`** da faturação;
+`r fmt_pct(mean(rfm_df$Frequency_Orders == 1))` compraram uma só vez.
+
+## P1 · O fim de ano é igual em todo o lado
+
+```{r}
+#| out-width: "100%"
+fig("p1_heatmap_country_month")
+```
+
+Associação trimestre × mercado
+**`r if (p1_cramer < 0.1) "muito fraca" else if (p1_cramer < 0.3) "fraca" else "moderada ou forte"`**
+(V de Cramér = `r fmt_num(p1_cramer, 3)`, `r fmt_p(p1_chisq$p.value)`).
+O pico vem de **mais encomendas**, não de encomendas maiores.
+
+## P2 · Os melhores clientes são os que mais devolvem
+
+```{r}
+#| out-width: "75%"
+fig("p2_returns_by_segment")
+```
+
+Quem compra mais tem mais ocasiões para devolver (ρ com a frequência =
+`r fmt_num(p2_spearman$rho[2], 2)`). **Devolver não é sinal de abandono.**
+
+## P3 · Recorrentes gastam um pouco mais por encomenda
+
+```{r}
+#| out-width: "55%"
+fig("p3_aov_occasional_vs_recurring")
+```
+
+Cerca de **`r fmt_pct(p3_ratio - 1, 0)` mais** por encomenda (`r fmt_p(p3_ttest$p.value)`):
+significativo, mas o valor de um cliente recorrente está sobretudo no número de encomendas.
+
+## P4 · Como evitar enganar o modelo
+
+::: {.columns}
+::: {.column width="50%"}
+**Antes**
+
+Churn = "não compra há 90 dias", com as variáveis medidas **no mesmo período**.
+O modelo aprende uma coincidência.
+:::
+::: {.column width="50%"}
+**Agora**
+
+Variáveis **antes** de `r format(cutoff, "%d/%m/%Y")`; churn observado nos
+**90 dias seguintes**.
+
+`r fmt_num(nrow(churn_df))` clientes, `r fmt_pct(mean(churn_df$Churn_90d == "Churn"))` churn.
+:::
+:::
+
+## P4 · Resultados
+
+::: {.columns}
+::: {.column width="45%"}
+```{r}
+fig("p4_roc_curves")
+```
+:::
+::: {.column width="55%"}
+- Regressão logística: **AUC `r fmt_num(r_logit$AUC, 3)`**; árvore: `r fmt_num(r_tree$AUC, 3)`
+- Fora do tempo (treino 90 dias antes): AUC `r fmt_num(auc_oot, 3)`
+- Limiar escolhido no treino (`r fmt_num(best_threshold, 2)`):
+  deteta **`r fmt_pct(r_opt$Sensitivity)`** dos churners
+- No teste: `r fmt_num(cm_opt["Churn", "Churn"])` de `r fmt_num(sum(cm_opt[, "Churn"]))`
+  churners apanhados, com `r fmt_num(cm_opt["Churn", "Ativo"])` falsos alarmes
+:::
+:::
+
+## O que faz um cliente ficar
+
+```{r}
+#| out-width: "80%"
+fig("p4_odds_ratios")
+```
+
+**Frequência** é o fator decisivo; valor ajuda; devoluções, país e antiguidade não contam.
+
+## Conclusões e limitações
+
+::: {.columns}
+::: {.column width="50%"}
+**Para o negócio**
+
+- Campanhas de retenção **antes de outubro**
+- Prioridade: fazer a **segunda e terceira encomenda**
+- Usar o modelo para campanhas baratas, não decisões caras
+:::
+::: {.column width="50%"}
+**Limitações**
+
+- Um retalhista, um ano, uma data de corte
+- Linhas sem cliente (sobretudo no Reino Unido) removidas
+- "90 dias sem comprar" é uma convenção
+:::
+:::
+
+## Obrigado
+
+Código, dados e relatórios reprodutíveis:
+**github.com/oshico/UFP-SSA**
+
+`Rscript data/raw/download_data.R` → `quarto render`

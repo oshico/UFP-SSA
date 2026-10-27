@@ -1,0 +1,35 @@
+project:
+  type: default
+  execute-dir: project
+  output-dir: _output
+  render:
+    - reports/m1.qmd
+    - reports/m2.qmd
+    - reports/m3.qmd
+    - reports/m4.qmd
+    - reports/m4-slides.qmd
+
+lang: pt-PT
+
+author:
+  - name: Francisco Oliveira
+    email: 2022111404@ufp.edu.pt
+    affiliation: Universidade Fernando Pessoa (MEINF)
+
+execute:
+  warning: false
+  message: false
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    code-summary: "Mostrar código"
+    code-tools: true
+    embed-resources: true
+    fig-width: 8
+    fig-height: 5
+    df-print: kable

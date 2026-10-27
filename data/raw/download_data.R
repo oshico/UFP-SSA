@@ -1,7 +1,8 @@
 # Reproducible acquisition of the raw dataset (SSA - MEINF / UFP).
 #
 # Not part of the analysis pipeline. This utility downloads the UCI "Online
-# Retail" dataset and converts it into the CSV that R/01_...R expects.
+# Retail" dataset and converts it into the CSV that
+# R/ecommerce_churn_analysis.R expects.
 #
 # Why a script rather than the file itself: the raw export is ~44 MB, so
 # committing it bloats the repository without adding information. Versioning
@@ -13,16 +14,12 @@
 #
 # Requires: readxl
 
-suppressPackageStartupMessages({
-  library(readxl)
-})
-
 # 1. Configuration -------------------------------------------------------------
 
 UCI_ZIP_URL <- "https://archive.ics.uci.edu/static/public/352/online+retail.zip"
 UCI_DOI     <- "10.24432/C5BW33"
 
-# Filename expected by R/01_ecommerce_churn_analysis.R.
+# Filename expected by R/ecommerce_churn_analysis.R.
 TARGET_CSV <- file.path("data", "raw", "data.csv")
 
 EXPECTED_ROWS <- 541909
@@ -181,7 +178,7 @@ cat("\nUnique customers (CustomerID):", format(n_customers, big.mark = ","), "\n
 
 cat("\nDataset ready:", TARGET_CSV, "\n")
 cat("Size        :", round(file.size(TARGET_CSV) / 1024^2, 1), "MB\n")
-cat("\nNext step: source(\"R/01_ecommerce_churn_analysis.R\") from the project root.\n")
+cat("\nNext step: Rscript R/ecommerce_churn_analysis.R (or quarto render) from the project root.\n")
 
 # Clean up the scratch files.
 unlink(c(zip_path, unzip_dir), recursive = TRUE, force = TRUE)

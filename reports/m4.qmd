@@ -1,0 +1,568 @@
+---
+title: "Previsão de churn e otimização do CLV no e-commerce"
+subtitle: "Relatório final · M4 · Seminário de Sistemas e Aplicações"
+date: last-modified
+---
+
+```{r}
+#| include: false
+knitr::read_chunk("R/ecommerce_churn_analysis.R")
+```
+
+```{r}
+#| label: setup
+#| include: false
+```
+
+```{r}
+#| label: load
+#| include: false
+```
+
+```{r}
+#| label: clean
+#| include: false
+```
+
+```{r}
+#| label: fx
+#| include: false
+```
+
+```{r}
+#| label: rfm
+#| include: false
+```
+
+```{r}
+#| label: p1
+#| include: false
+```
+
+```{r}
+#| label: p2
+#| include: false
+```
+
+```{r}
+#| label: p3
+#| include: false
+```
+
+```{r}
+#| label: churn-frame
+#| include: false
+```
+
+```{r}
+#| label: model-helpers
+#| include: false
+```
+
+```{r}
+#| label: model-split
+#| include: false
+```
+
+```{r}
+#| label: model-fit
+#| include: false
+```
+
+```{r}
+#| label: model-evaluate
+#| include: false
+```
+
+```{r}
+#| label: inline-values
+#| include: false
+r_logit  <- model_results[1, ]
+r_opt    <- model_results[2, ]
+r_tree   <- model_results[3, ]
+churn_rate <- mean(churn_df$Churn_90d == "Churn")
+top5_share <- with(rfm_df, sum(sort(Monetary_EUR, decreasing = TRUE)[1:ceiling(0.05 * length(Monetary_EUR))]) / sum(Monetary_EUR))
+uk_rev_share <- with(orders, sum(Order_EUR[Market == "Reino Unido"]) / sum(Order_EUR))
+q4_share <- with(orders, sum(Order_EUR[Quarter == "T4"]) / sum(Order_EUR))
+q_medians <- orders %>% group_by(Quarter) %>% summarise(m = median(Order_EUR))
+seg <- function(s, col) p2_summary[[col]][p2_summary$Segment == s]
+p3_geo <- setNames(p3_summary$Geo_Mean_AOV, as.character(p3_summary$Customer_Type))
+or <- function(term, col = "OR") logit_or[[col]][logit_or$term == term]
+cm_opt <- m_logit_opt$matrix
+flagged <- sum(cm_opt["Churn", ])
+caught  <- cm_opt["Churn", "Churn"]
+churners_test <- sum(cm_opt[, "Churn"])
+miss_uk  <- mean(is.na(df_raw$CustomerID[df_raw$Country == "United Kingdom"]))
+miss_out <- mean(is.na(df_raw$CustomerID[df_raw$Country != "United Kingdom"]))
+```
+
+::: {.callout-note appearance="simple"}
+## Resumo executivo
+
+O churn silencioso, em que o cliente deixa de comprar sem aviso, é difícil de
+detetar porque não gera nenhum evento. Este projeto usa
+`r fmt_num(nrow(df_raw))` transações reais de um retalhista online britânico
+(UCI *Online Retail*, 2010–2011), convertidas para euros com taxas diárias do BCE
+obtidas por API REST, para perceber o que distingue os clientes que abandonam
+e para prever quem vai abandonar nos 90 dias seguintes. Depois de limpar
+duplicados, linhas sem cliente, taxas e encomendas anuladas, as transações são
+agregadas em `r fmt_num(nrow(rfm_df))` perfis RFM. Para evitar fuga de
+informação, as variáveis do modelo são calculadas só com dados anteriores a uma
+data de corte e o churn é observado nos 90 dias seguintes. A regressão logística
+atinge AUC de `r fmt_num(r_logit$AUC, 3)` no teste
+(`r fmt_num(auc_oot, 3)` numa validação fora do tempo) e, com o limiar escolhido
+no treino, deteta `r fmt_pct(r_opt$Sensitivity)` dos churners. **A frequência
+de compra é, de longe, o fator mais protetor**; as devoluções, embora mais
+frequentes nos melhores clientes, não acrescentam poder preditivo depois de
+controlada a frequência.
+:::
+
+# Introdução
+
+## Contexto
+
+No comércio eletrónico o custo de aquisição de clientes tem vindo a aumentar,
+o que torna a retenção a forma mais rentável de proteger margens. Mas reter
+exige saber **quem** está prestes a sair, e num retalhista sem subscrições não
+existe um momento de "cancelamento": o cliente simplesmente não volta. O
+objetivo deste trabalho é transformar o histórico transacional num sinal de
+risco que permita dirigir campanhas de retenção aos clientes certos.
+
+## Justificação pessoal
+
+::: {.callout-tip appearance="simple" icon="false"}
+## Porquê este tema
+
+As plataformas digitais fazem parte do nosso quotidiano e, quase sem darmos
+por isso, reagem ao nosso comportamento:
+
+- **Recomendações personalizadas** surgem logo depois de visualizarmos um
+  anúncio;
+- **Cupões de desconto por inatividade** aparecem quando deixamos de usar a
+  plataforma durante algum tempo.
+
+Foi esta observação que motivou a escolha do tema. Quis perceber **como estas
+plataformas transformam a informação que recolhem sobre os utilizadores em
+estratégias de retenção** e, em particular, como é possível antecipar que um
+cliente está prestes a abandonar.
+:::
+
+## Perguntas analíticas
+
+| ID | Pergunta |
+|---|---|
+| **P1** | Como variam a faturação e o número de encomendas ao longo dos trimestres e entre mercados geográficos? |
+| **P2** | Qual a relação entre o rácio de devoluções e os segmentos RFM dos clientes? |
+| **P3** | Há diferença significativa no valor médio por encomenda entre clientes recorrentes e ocasionais? |
+| **P4** | É possível prever o churn a 90 dias com sensibilidade adequada? |
+
+## Evolução desde os momentos anteriores
+
+O projeto mudou de forma substancial desde M3, em parte por *feedback* e em
+parte por erros encontrados ao executar o código pela primeira vez:
+
+- **Os valores de M3 eram ilustrativos.** O PDF de M3 apresentava estatísticas e
+  métricas de modelos (exatidão de 88,4%, AUC de 0,924) que não vinham de
+  código. Os documentos M1–M3 foram reescritos em Quarto e todos os números são
+  agora calculados pelo pipeline (ver errata em M3).
+- **Fuga de informação na variável-alvo.** Na primeira versão o churn era
+  "recência > 90 dias" e as variáveis eram calculadas no mesmo período, o que
+  favorecia o modelo por construção. Passou a usar-se uma separação temporal
+  (secção 5).
+- **Limpeza mais rigorosa:** remoção de duplicados, de linhas que não são
+  produtos e de encomendas anuladas na totalidade, que estavam a inflacionar o
+  valor de alguns clientes.
+- **Câmbio histórico em vez de atual:** cada venda é convertida à taxa do
+  próprio dia, em vez de uma taxa de 2026 aplicada a vendas de 2011.
+- **Reprodutibilidade:** o dataset é descarregado por script, os caminhos são
+  relativos e a resposta da API fica em cache local (não versionada).
+
+# Metodologia e dados
+
+## Origem dos dados
+
+| Camada | Fonte | Conteúdo |
+|---|---|---|
+| Histórica | *Online Retail*, UCI ([10.24432/C5BW33](https://doi.org/10.24432/C5BW33)), CC BY 4.0 | `r fmt_num(nrow(df_raw))` linhas de faturas, `r format(min(df_clean$InvoiceDate), "%d/%m/%Y")` a `r format(max(df_clean$InvoiceDate), "%d/%m/%Y")` |
+| Dinâmica | API REST Frankfurter (taxas de referência do BCE) | Taxa GBP → EUR diária; origem nesta execução: **`r fx$source`** |
+
+O dicionário completo das variáveis de origem, com contagens de valores em
+falta, está em M2. As variáveis usadas na análise são:
+
+| Variável | Definição |
+|---|---|
+| `Recency_Days` | Dias desde a última compra até à data de referência |
+| `Frequency_Orders` | Número de faturas de compra distintas |
+| `Monetary_EUR` | Soma das compras em EUR, sem devoluções nem encomendas anuladas |
+| `AOV_EUR` | Valor médio por encomenda |
+| `Return_Ratio` | Linhas de devolução / total de linhas do cliente |
+| `Tenure_Days` | Dias desde a primeira compra |
+| `Is_UK` | 1 se o cliente é do Reino Unido |
+| `Churn_90d` | Alvo: "Churn" se não há compras nos 90 dias após a data de corte |
+
+## Limpeza e transformação
+
+```{r}
+#| label: wrangling-table
+#| echo: false
+wrangling_log %>%
+  mutate(Removidas = lag(rows) - rows,
+         Passo = c("Ficheiro bruto", "Remover linhas duplicadas",
+                   "Remover linhas sem CustomerID", "Remover preços não positivos",
+                   "Remover portes, taxas e ajustes")) %>%
+  transmute(Passo, `Linhas restantes` = fmt_num(rows),
+            Removidas = if_else(is.na(Removidas), "", fmt_num(Removidas))) %>%
+  knitr::kable(align = "lrr", caption = "Efeito de cada passo de limpeza")
+```
+
+As decisões de limpeza e a respetiva justificação estão detalhadas em M3. Em
+resumo: os duplicados exatos são registos repetidos e não vendas; as linhas sem
+cliente não podem ser atribuídas a ninguém (e as faltas concentram-se no Reino
+Unido: `r fmt_pct(miss_uk)` das linhas contra `r fmt_pct(miss_out)` noutros
+países); portes, comissões e acertos não são comportamento de compra; e
+`r fmt_num(n_cancelled_purchases)` linhas de compra anuladas na totalidade,
+incluindo as duas encomendas extremas de 80 995 e 74 215 unidades, deixam de
+contar como gasto. Os *outliers* de valor que restam
+(`r fmt_num(n_monetary_outliers)` clientes acima de Q3 + 3×IQR) são clientes
+grossistas reais e são mantidos, com `log1p()` a limitar a sua influência nos
+modelos.
+
+O passo mais delicado é a anulação de encomendas, porque emparelha duas tabelas
+(compras e devoluções) um-para-um. Uma compra é anulada quando há uma devolução
+posterior da quantidade total, em qualquer momento; as devoluções parciais não
+reduzem o gasto, mas contam para o rácio de devoluções:
+
+```{r}
+#| label: cancel-code
+#| eval: false
+#| code-fold: false
+cancelled_ids <- purchases %>%
+  arrange(P_Date) %>%
+  group_by(CustomerID, StockCode, Qty) %>% mutate(k = row_number()) %>% ungroup() %>%
+  inner_join(
+    returns %>% arrange(R_Date) %>%
+      group_by(CustomerID, StockCode, Qty) %>% mutate(k = row_number()) %>% ungroup(),
+    by = c("CustomerID", "StockCode", "Qty", "k")
+  ) %>%
+  filter(R_Date >= P_Date) %>%
+  pull(Line_ID)
+```
+
+# Análise exploratória
+
+```{r}
+#| label: fig-eda-dist
+#| fig-cap: "Distribuições de recência, frequência e valor monetário por cliente."
+#| fig-width: 10
+#| fig-height: 4
+```
+
+O cliente típico é pequeno e o cliente médio não é: o valor monetário médio é
+`r fmt_num(mean(rfm_df$Monetary_EUR))` € mas a mediana é
+`r fmt_num(median(rfm_df$Monetary_EUR))` €, e os 5% que mais gastam geram
+`r fmt_pct(top5_share)` da faturação. `r fmt_pct(mean(rfm_df$Frequency_Orders == 1))`
+dos clientes compraram uma única vez. Esta concentração tem uma consequência
+prática: perder um cliente grande pesa muito mais do que perder um pequeno, o que
+reforça a importância de detetar cedo os clientes em risco.
+
+# Resultados por pergunta
+
+## P1 · Sazonalidade e mercados
+
+```{r}
+#| label: fig-p1-heatmap
+#| fig-cap: "Peso de cada mês na faturação anual dos oito maiores mercados (dez 2010 – nov 2011)."
+#| fig-width: 10
+```
+
+```{r}
+#| label: fig-p1-quarter
+#| fig-cap: "Encomendas por trimestre e mercado."
+#| fig-width: 9
+#| fig-height: 4
+```
+
+Usam-se os 12 meses completos de dezembro de 2010 a novembro de 2011, para ter
+um ciclo anual inteiro sem contar dezembro duas vezes. O Reino Unido gera
+`r fmt_pct(uk_rev_share)` da faturação, e o quarto trimestre
+`r fmt_pct(q4_share)` do total, bem acima dos 25% de uma distribuição uniforme.
+O padrão de fim de ano repete-se em quase todos os mercados (@fig-p1-heatmap).
+O teste do qui-quadrado
+`r if (p1_chisq$p.value < 0.05) "deteta" else "não deteta"` uma associação
+estatisticamente significativa entre trimestre e mercado
+(χ² = `r fmt_num(p1_chisq$statistic, 1)`, `r fmt_p(p1_chisq$p.value)`), mas com
+este número de encomendas a significância diz pouco: o V de Cramér
+(`r fmt_num(p1_cramer, 3)`) indica uma associação
+**`r if (p1_cramer < 0.1) "muito fraca" else if (p1_cramer < 0.3) "fraca" else "moderada ou forte"`**.
+
+O valor de cada encomenda varia entre trimestres de forma estatisticamente
+significativa (Kruskal-Wallis, `r fmt_p(p1_kruskal$p.value)`), mas pouco em
+termos práticos: a mediana vai de `r fmt_num(min(q_medians$m))` € a
+`r fmt_num(max(q_medians$m))` €. **O pico de fim de ano vem de mais encomendas,
+não de encomendas maiores.** Para retenção, isto sugere que as campanhas devem
+chegar antes de outubro, quando os clientes ainda estão a decidir se voltam.
+
+## P2 · Devoluções e segmentos RFM
+
+```{r}
+#| label: fig-p2
+#| fig-cap: "Proporção de clientes com pelo menos uma devolução, por segmento RFM, com IC a 95%."
+```
+
+Os segmentos são definidos pelos quintis de recência e frequência. O resultado
+contraria a intuição de que as devoluções sinalizam clientes insatisfeitos:
+**os Campeões são o segmento que mais devolve**
+(`r fmt_pct(seg("Campeões", "Pct_With_Return"))` com pelo menos uma devolução,
+contra `r fmt_pct(seg("Perdidos", "Pct_With_Return"))` nos Perdidos e
+`r fmt_pct(seg("Recentes", "Pct_With_Return"))` nos Recentes). As diferenças são
+significativas tanto no rácio de devoluções (Kruskal-Wallis,
+`r fmt_p(p2_kruskal$p.value)`) como na proporção de clientes que devolvem
+(χ², `r fmt_p(p2_chisq$p.value)`).
+
+A explicação mais provável é a exposição: quem compra mais tem mais
+oportunidades de devolver. O rácio de devoluções correlaciona-se positivamente
+com a frequência (ρ de Spearman = `r fmt_num(p2_spearman$rho[2], 2)`) e com o
+valor (ρ = `r fmt_num(p2_spearman$rho[3], 2)`), e negativamente com a recência
+(ρ = `r fmt_num(p2_spearman$rho[1], 2)`). A modelação (P4) confirma que, depois
+de controlar a frequência, as devoluções deixam de ter efeito no churn.
+
+## P3 · Valor por encomenda: recorrentes vs. ocasionais
+
+```{r}
+#| label: fig-p3
+#| fig-cap: "Valor médio por encomenda por tipo de cliente (escala logarítmica)."
+#| fig-width: 7
+```
+
+O valor por encomenda tem uma distribuição muito assimétrica, por isso o teste
+*t* de Welch é aplicado ao seu logaritmo e o resultado lê-se como um rácio de
+médias geométricas. Os clientes recorrentes gastam em média
+`r fmt_num(p3_geo["Recorrente"])` € por encomenda contra
+`r fmt_num(p3_geo["Ocasional"])` € dos ocasionais: **cerca de
+`r fmt_pct(p3_ratio - 1, 0)` mais** (IC 95% do rácio:
+`r fmt_num(p3_ratio_ci[1], 2)` a `r fmt_num(p3_ratio_ci[2], 2)`;
+`r fmt_p(p3_ttest$p.value)`). O teste de Wilcoxon, que não assume
+normalidade, chega à mesma conclusão (`r fmt_p(p3_wilcox$p.value)`).
+
+A diferença é real mas moderada. Com milhares de clientes, quase qualquer
+diferença é significativa; o que importa é a sua dimensão. Converter um cliente
+ocasional em recorrente vale sobretudo pelas encomendas adicionais, e só em
+segundo plano por encomendas maiores.
+
+# Modelação do churn (P4)
+
+## Desenho
+
+A variável-alvo é construída com uma **separação temporal**. A data de corte é
+`r format(cutoff, "%d/%m/%Y")`, 90 dias antes do fim dos dados. As variáveis
+usam apenas transações anteriores ao corte; o cliente é "Churn" se não comprar
+nos 90 dias seguintes. Dos `r fmt_num(nrow(churn_df))` clientes ativos antes do
+corte, `r fmt_pct(churn_rate)` não voltaram a comprar.
+
+```{r}
+#| label: churn-frame-show
+#| eval: false
+#| code-fold: false
+build_churn_frame <- function(tx, cutoff, window = CHURN_WINDOW_DAYS) {
+  past   <- tx %>% filter(InvoiceDate < cutoff)            # features
+  future <- tx %>% filter(InvoiceDate >= cutoff,            # label
+                          InvoiceDate < cutoff + days(window), ...)
+  ...
+}
+```
+
+Comparam-se dois modelos, treinados numa partição estratificada 70/30
+(`r fmt_num(nrow(train_set))` / `r fmt_num(nrow(test_set))` clientes):
+
+- **Regressão logística**, pela interpretabilidade: cada coeficiente é um odds
+  ratio que se pode explicar a um gestor.
+- **Árvore de decisão** (`rpart`), podada pelo erro mínimo de validação cruzada
+  a 10 *folds*, para verificar se relações não lineares acrescentam algo.
+
+```{r}
+#| label: model-fit-show
+#| eval: false
+#| code-fold: false
+model_formula <- Churn_90d ~ Recency_30d + Log_Frequency + Log_Monetary +
+  Return_Ratio + Tenure_30d + Is_UK
+model_logit <- glm(model_formula, data = train_set, family = binomial)
+```
+
+## Resultados
+
+```{r}
+#| label: model-table
+#| echo: false
+model_results %>%
+  mutate(Threshold = fmt_num(Threshold, 2),
+         across(Accuracy:AUC, ~ fmt_num(.x, 3))) %>%
+  rename(Modelo = Model, Limiar = Threshold, Exatidão = Accuracy,
+         Sensibilidade = Sensitivity, Especificidade = Specificity,
+         Precisão = Precision) %>%
+  knitr::kable(align = "lrrrrrrr", caption = "Desempenho no conjunto de teste")
+```
+
+```{r}
+#| label: fig-roc
+#| fig-cap: "Curvas ROC dos dois modelos no conjunto de teste."
+#| fig-width: 6.5
+#| fig-height: 6.5
+```
+
+A regressão logística é melhor do que a árvore na generalidade dos limiares
+(AUC `r fmt_num(r_logit$AUC, 3)` contra `r fmt_num(r_tree$AUC, 3)`,
+@fig-roc). A árvore não encontrou interações que compensassem a perda de
+estabilidade; o modelo mais simples ganha. A comparação faz-se pela AUC, que não
+depende do limiar: na tabela, a árvore usa o limiar de 0,5 e a regressão
+logística aparece com 0,5 e com o limiar escolhido no treino.
+
+**Escolha do limiar.** Com o limiar padrão de 0,5, o modelo deteta só
+`r fmt_pct(r_logit$Sensitivity)` dos churners. Mas os dois erros não custam o
+mesmo: um churner não detetado é um cliente perdido, um falso alarme é um
+email de retenção desnecessário. O limiar foi por isso escolhido **no conjunto
+de treino**, pelo índice de Youden, e só depois aplicado ao teste:
+`r fmt_num(best_threshold, 2)`. Com ele, a sensibilidade sobe para
+`r fmt_pct(r_opt$Sensitivity)`, à custa de a especificidade descer para
+`r fmt_pct(r_opt$Specificity)`.
+
+```{r}
+#| label: confusion-table
+#| echo: false
+as.data.frame.matrix(cm_opt) %>%
+  tibble::rownames_to_column("Previsto \\ Real") %>%
+  knitr::kable(caption = sprintf("Matriz de confusão no teste (limiar %s)", fmt_num(best_threshold, 2)))
+```
+
+Em termos de negócio: dos `r fmt_num(nrow(test_set))` clientes no teste, o modelo
+assinala `r fmt_num(flagged)` para uma campanha, e entre elas estão
+`r fmt_num(caught)` dos `r fmt_num(churners_test)` clientes que de facto iam sair.
+
+**Validação fora do tempo.** Um modelo treinado com um corte 90 dias mais cedo
+(`r format(cutoff_early, "%d/%m/%Y")`) e aplicado ao corte principal obtém AUC
+de `r fmt_num(auc_oot, 3)`, próxima da do teste aleatório. O modelo mantém o
+desempenho quando é usado como seria na prática: ajustado ao passado para
+pontuar o presente.
+
+## O que o modelo diz sobre o churn
+
+```{r}
+#| label: fig-odds
+#| fig-cap: "Odds ratios da regressão logística com IC a 95%."
+#| fig-width: 8
+#| fig-height: 4.5
+```
+
+- **Frequência** é o fator mais forte: cada aumento de uma unidade em
+  log(1 + encomendas), aproximadamente passar de 1 para 4 encomendas,
+  multiplica as odds de churn por `r fmt_num(or("Log_Frequency"), 2)`.
+- **Valor monetário** também protege, de forma mais fraca
+  (OR = `r fmt_num(or("Log_Monetary"), 2)`), mesmo depois de controlar a
+  frequência.
+- **Recência** `r if (or("Recency_30d", "p_value") < 0.05) "aumenta o risco, como esperado" else "aponta no sentido esperado (mais risco), mas sem significância a 5% depois de controlar a frequência"`
+  (OR = `r fmt_num(or("Recency_30d"), 2)` por cada 30 dias sem comprar,
+  `r fmt_p(or("Recency_30d", "p_value"))`). Os odds ratios estão em unidades
+  diferentes (30 dias vs. uma unidade de log), por isso não se comparam
+  diretamente entre variáveis.
+- **Frequência e valor andam juntos** (quem encomenda mais gasta mais), por isso
+  cada coeficiente mede o efeito de uma *mantendo a outra fixa*, e deve ser lido
+  com essa ressalva.
+- **Rácio de devoluções, antiguidade e país** não têm efeito significativo
+  (`r fmt_p(or("Return_Ratio", "p_value"))`,
+  `r fmt_p(or("Tenure_30d", "p_value"))` e `r fmt_p(or("Is_UK", "p_value"))`).
+  Isto confirma a leitura de P2: as devoluções acompanham a atividade, não a
+  insatisfação.
+
+# Conclusões e limitações dos dados
+
+**Respostas às perguntas.**
+
+- **P1.** A faturação concentra-se no Reino Unido e no quarto trimestre. A
+  sazonalidade é comum a todos os mercados e vem do número de encomendas, não
+  do seu valor.
+- **P2.** Os segmentos mais valiosos são os que mais devolvem. A relação
+  explica-se pela exposição (quem compra mais devolve mais) e não é um sinal de
+  abandono.
+- **P3.** Os clientes recorrentes gastam cerca de
+  `r fmt_pct(p3_ratio - 1, 0)` mais por encomenda. A diferença é significativa
+  mas moderada.
+- **P4.** Sim, com reservas. A regressão logística discrimina razoavelmente
+  (AUC `r fmt_num(r_logit$AUC, 3)`) e, com um limiar ajustado, deteta
+  `r fmt_pct(r_opt$Sensitivity)` dos churners, à custa de muitos falsos
+  alarmes. É útil para priorizar campanhas baratas, não para decisões caras
+  cliente a cliente.
+
+**Limitações dos dados e da extrapolação.**
+
+- **Um só retalhista, um só ano.** Os resultados descrevem este negócio
+  (maioritariamente grossista, de artigos de oferta) em 2010–2011. Não se podem
+  generalizar a outros setores ou períodos sem nova validação.
+- **Faltas não aleatórias.** Removeram-se as linhas sem cliente, que pesam muito
+  mais no Reino Unido. Se forem compradores ocasionais sem conta, a amostra
+  sobrerrepresenta clientes registados e fiéis.
+- **Uma janela de churn.** O histórico de um ano permite poucas datas de corte;
+  a validação fora do tempo usa apenas uma.
+- **Janela sazonal.** O corte cai em `r format(cutoff, "%d/%m/%Y")`, por isso a
+  janela do alvo cobre o pico de fim de ano: a taxa de churn observada é
+  provavelmente mais baixa do que noutra altura do ano.
+- **Churn definido por convenção.** "Sem compras em 90 dias" é uma escolha. Um
+  grossista que encomenda a cada quatro meses é rotulado churner sem o ser.
+- **Câmbio.** Se a API não estiver disponível e não houver cache, é usada uma
+  taxa fixa. Isso muda os valores em euros mas não as conclusões, porque
+  afeta todos os clientes por igual.
+
+# Limitações do trabalho e trabalho futuro
+
+O maior desafio foi metodológico e não técnico: perceber que a primeira versão
+do modelo tinha bons números por razões erradas. A separação temporal reduziu
+as métricas mas tornou-as honestas. Ficou também a lição de que os relatórios
+devem ser gerados pelo código desde o primeiro momento, para que nunca
+apresentem números que o código não produz.
+
+Melhorias possíveis:
+
+- **Validação com vários cortes** (janela deslizante) quando houver mais
+  histórico, para medir a estabilidade do modelo ao longo do ano.
+- **Variáveis de produto**, a partir de `Description`: categorias compradas,
+  diversidade do cabaz, sazonalidade dos artigos.
+- **Modelos de *ensemble*** (por exemplo *random forest* ou *gradient
+  boosting*), comparados com a regressão logística pela AUC e pela calibração.
+- **Limiar orientado ao custo**, se a empresa fornecer o custo de uma campanha
+  e o valor esperado de um cliente retido.
+- **Aplicação prática:** pontuar a base de clientes todos os meses e exportar
+  uma lista priorizada por risco × valor para a equipa de marketing.
+
+# Anexos
+
+## Repositório
+
+Código, histórico de *commits* e documentos de todos os momentos:
+<https://github.com/oshico/UFP-SSA>. Para reproduzir este relatório, a partir
+da raiz do repositório:
+
+```bash
+Rscript data/raw/download_data.R   # descarrega o dataset do UCI
+quarto render                       # gera M1–M4 em _output/
+```
+
+## Declaração de uso de IA
+
+Ver `README.md`, secção "Generative AI usage declaration".
+
+## Código completo do pipeline
+
+O código abaixo é o mesmo que corre no início deste relatório (lido de
+`R/ecommerce_churn_analysis.R`); aparece aqui para consulta.
+
+```{r}
+#| label: full-pipeline
+#| eval: false
+#| ref.label: !expr c("load", "clean", "fx", "rfm", "p1", "p2", "p3", "churn-frame", "model-helpers", "model-split", "model-fit", "model-evaluate")
+```
+
+## Ambiente de execução
+
+```{r}
+#| label: session-info
+#| code-fold: true
+sessionInfo()
+```

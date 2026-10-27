@@ -1,0 +1,239 @@
+---
+title: "M3 · Preparação dos dados e análise exploratória"
+subtitle: "Previsão de churn e otimização do CLV no e-commerce"
+date: 2026-10-20
+date-modified: last-modified
+---
+
+::: {.callout-important}
+## Errata em relação à versão apresentada em M3
+
+A versão PDF de M3 (`docs/m3.pdf`, no histórico Git) continha **valores
+ilustrativos que não foram produzidos por código**, porque na altura o pipeline
+ainda não corria de ponta a ponta. Isso incluía as estatísticas descritivas, as
+afirmações da análise exploratória e os resultados dos modelos (exatidão de
+88,4%, AUC de 0,924 e a comparação com uma árvore de decisão). Esses valores
+são retirados.
+
+Este documento substitui-o. **Todos os números abaixo são calculados no momento
+da renderização** pelo script `R/ecommerce_churn_analysis.R`. A versão anterior
+indicava também a recência como principal preditor de churn; como o alvo era
+definido pela própria recência, isso seria uma fuga de informação. A estratégia
+de modelação da secção 5 corrige esse problema.
+:::
+
+```{r}
+#| include: false
+knitr::read_chunk("R/ecommerce_churn_analysis.R")
+```
+
+```{r}
+#| label: setup
+#| include: false
+```
+
+## Leitura dos dados
+
+```{r}
+#| label: load
+```
+
+## Limpeza e transformação (*wrangling*)
+
+```{r}
+#| label: clean
+```
+
+```{r}
+#| label: wrangling-table
+#| echo: false
+wrangling_log %>%
+  mutate(Removidas = lag(rows) - rows,
+         Passo = c("Ficheiro bruto", "Remover linhas duplicadas",
+                   "Remover linhas sem CustomerID", "Remover preços não positivos",
+                   "Remover portes, taxas e ajustes")) %>%
+  transmute(Passo, `Linhas restantes` = fmt_num(rows),
+            Removidas = if_else(is.na(Removidas), "", fmt_num(Removidas))) %>%
+  knitr::kable(align = "lrr", caption = "Efeito de cada passo de limpeza")
+```
+
+```{r}
+#| include: false
+miss_uk  <- mean(is.na(df_raw$CustomerID[df_raw$Country == "United Kingdom"]))
+miss_out <- mean(is.na(df_raw$CustomerID[df_raw$Country != "United Kingdom"]))
+```
+
+**Porquê cada decisão:**
+
+- **Duplicados.** `r fmt_num(n_duplicates)` linhas são cópias exatas de outra
+  (mesma fatura, produto, quantidade, hora e preço). São registos duplicados,
+  não duas vendas, e inflacionariam a frequência e o valor.
+- **Valores em falta.** O único campo com faltas relevantes é `CustomerID`
+  (`r fmt_num(n_missing_customer)` linhas após remover duplicados). Não há forma
+  de imputar a quem pertence uma compra, e sem cliente a linha não serve para
+  RFM nem churn, por isso é removida. As faltas **não são aleatórias**: atingem
+  `r fmt_pct(miss_uk)` das linhas do Reino Unido contra `r fmt_pct(miss_out)`
+  das restantes, o que é uma limitação a declarar (provavelmente vendas sem
+  conta registada).
+- **Preços não positivos** são ajustes contabilísticos, não vendas.
+- **Linhas que não são produtos** (`POST`, `DOT`, `M`, `BANK CHARGES`,
+  `AMAZONFEE`, vales de oferta, …) são portes, comissões e acertos manuais.
+  Contá-las como compras misturaria custos logísticos com comportamento de
+  compra.
+- ***Outliers*.** As quantidades mais extremas (80 995 e 74 215 unidades) são
+  encomendas canceladas na totalidade minutos depois. Em vez de cortar acima de
+  um limiar arbitrário, cada linha de compra é emparelhada um-para-um com uma
+  devolução posterior da quantidade total (mesmo cliente, produto e quantidade,
+  em qualquer momento depois da compra):
+  `r fmt_num(n_cancelled_purchases)` linhas de compra foram anuladas assim e
+  deixam de contar como gasto. As devoluções parciais não são emparelhadas, e
+  todas as devoluções continuam a contar para o rácio de devoluções.
+
+### Conversão cambial pela API REST
+
+```{r}
+#| label: fx
+```
+
+Cada transação é convertida à taxa de referência do BCE do próprio dia (API
+Frankfurter), com a última taxa publicada a cobrir fins de semana e feriados.
+As taxas históricas não mudam, por isso a resposta da API fica guardada em
+`data/external/` (localmente, não versionada; um clone novo volta a pedi-la à
+API): execuções seguintes são deterministas e funcionam sem rede. Nesta renderização, a origem das taxas foi
+**`r fx$source`**, com taxa média de `r fmt_num(mean(df_clean$GBP_EUR), 4)` EUR
+por GBP.
+
+## Matriz RFM e estatística descritiva
+
+```{r}
+#| label: rfm
+```
+
+A data de referência é `r format(ref_date, "%d/%m/%Y")` (o dia seguinte à
+última transação). Restam **`r fmt_num(nrow(rfm_df))` clientes** com pelo menos
+uma compra.
+
+```{r}
+#| label: descriptive-table
+#| echo: false
+describe <- function(x) c(Média = mean(x), `Desv. padrão` = sd(x), Mínimo = min(x),
+                          Q1 = quantile(x, .25, names = FALSE), Mediana = median(x),
+                          Q3 = quantile(x, .75, names = FALSE), Máximo = max(x))
+desc_vars <- c("Recência (dias)" = "Recency_Days", "Frequência (encomendas)" = "Frequency_Orders",
+               "Valor monetário (EUR)" = "Monetary_EUR", "Valor por encomenda (EUR)" = "AOV_EUR",
+               "Rácio de devoluções" = "Return_Ratio")
+map_dfr(desc_vars, ~ describe(rfm_df[[.x]]), .id = "Métrica") %>%
+  mutate(across(-Métrica, ~ fmt_num(.x, 2))) %>%
+  knitr::kable(align = "lrrrrrrr", caption = "Estatística descritiva por cliente")
+```
+
+```{r}
+#| label: fig-eda-dist
+#| fig-cap: "Distribuições de recência, frequência e valor monetário."
+#| fig-width: 10
+#| fig-height: 4
+```
+
+```{r}
+#| include: false
+top5_share <- with(rfm_df, sum(sort(Monetary_EUR, decreasing = TRUE)[1:ceiling(0.05 * length(Monetary_EUR))]) / sum(Monetary_EUR))
+```
+
+**Leitura.** O valor monetário tem uma assimetria forte à direita (média
+`r fmt_num(mean(rfm_df$Monetary_EUR))` € contra mediana
+`r fmt_num(median(rfm_df$Monetary_EUR))` €): os 5% de clientes que mais gastam
+geram `r fmt_pct(top5_share)` da faturação. Há `r fmt_num(n_monetary_outliers)`
+clientes acima de Q3 + 3×IQR. São mantidos, porque são grossistas reais e não
+erros; para a modelação usa-se `log1p()` da frequência e do valor, o que limita a
+influência destes clientes sem os apagar. A frequência é igualmente enviesada:
+a mediana é `r median(rfm_df$Frequency_Orders)` encomendas e
+`r fmt_pct(mean(rfm_df$Frequency_Orders == 1))` dos clientes compraram uma única vez.
+
+## Exploração das perguntas P1 a P3
+
+### P1 · Sazonalidade e mercados
+
+```{r}
+#| label: p1
+```
+
+```{r}
+#| label: fig-p1-heatmap
+#| fig-cap: "Peso de cada mês na faturação anual dos oito maiores mercados."
+#| fig-width: 10
+```
+
+```{r}
+#| label: fig-p1-quarter
+#| fig-cap: "Encomendas por trimestre em cada mercado."
+#| fig-width: 9
+#| fig-height: 4
+```
+
+O pico de fim de ano é visível em quase todos os mercados (@fig-p1-heatmap).
+Entre Reino Unido, UE e resto do mundo, a distribuição das encomendas pelos
+trimestres `r if (p1_chisq$p.value < 0.05) "difere de forma estatisticamente significativa" else "não difere de forma estatisticamente significativa"`
+(χ² = `r fmt_num(p1_chisq$statistic, 1)`, `r fmt_p(p1_chisq$p.value)`). Com
+milhares de encomendas, o que importa é a dimensão da associação: o V de Cramér
+é `r fmt_num(p1_cramer, 3)`, uma associação
+`r if (p1_cramer < 0.1) "muito fraca" else if (p1_cramer < 0.3) "fraca" else "moderada ou forte"`.
+
+### P2 · Devoluções e segmentos RFM
+
+```{r}
+#| label: p2
+```
+
+```{r}
+#| label: fig-p2
+#| fig-cap: "Proporção de clientes com pelo menos uma devolução, por segmento RFM."
+```
+
+### P3 · Valor por encomenda: recorrentes vs. ocasionais
+
+```{r}
+#| label: p3
+```
+
+```{r}
+#| label: fig-p3
+#| fig-cap: "Distribuição do valor médio por encomenda por tipo de cliente."
+#| fig-width: 7
+```
+
+As respostas formais a P2 e P3, com testes e interpretação, ficam para o
+relatório final (M4).
+
+## Estratégia de modelação (P4)
+
+**O problema da versão anterior.** Definir churn como "recência > 90 dias" e
+calcular a frequência e o valor no mesmo período cria uma relação por
+construção: quem é churner teve menos tempo ativo e, por isso, menos encomendas.
+O modelo aprenderia em parte essa coincidência e não comportamento real.
+
+**A correção: separação temporal.** Escolhe-se uma data de corte 90 dias antes
+do fim dos dados. As variáveis são calculadas **só com transações anteriores**
+ao corte; o alvo observa os **90 dias seguintes**: churn se o cliente não
+comprar nessa janela. Assim a recência pode entrar como preditor sem fuga de
+informação.
+
+```{r}
+#| label: churn-frame
+```
+
+Com corte em `r format(cutoff, "%d/%m/%Y")`, há
+`r fmt_num(nrow(churn_df))` clientes ativos antes do corte, dos quais
+`r fmt_pct(mean(churn_df$Churn_90d == "Churn"))` não voltaram a comprar.
+
+**Plano para M4:**
+
+1. Partição estratificada 70/30 com semente fixa.
+2. Regressão logística (interpretável, odds ratios) e árvore de decisão
+   (`rpart`, podada por validação cruzada) como comparação.
+3. Avaliação no conjunto de teste: matriz de confusão, sensibilidade,
+   especificidade, F1 e AUC/curva ROC.
+4. Escolha do limiar de decisão **no conjunto de treino**, a favor da
+   sensibilidade: falhar um churner custa o CLV do cliente, enquanto um falso
+   alarme custa apenas uma campanha.
+5. Validação fora do tempo: treinar com um corte 90 dias mais cedo e testar no
+   corte principal.
